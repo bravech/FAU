@@ -1,160 +1,217 @@
+#!/usr/bin/env python
+#
+# Redirect data from a TCP/IP connection to a serial port and vice versa.
+#
+# (C) 2002-2016 Chris Liechti <cliechti@gmx.net>
+#
+# SPDX-License-Identifier:    BSD-3-Clause
+
 import sys
-import glob
-import serial
-import struct
 import socket
-import threading
-from queue import Queue
+import serial
+import serial.threaded
+import time
 
 
-#Checking for proper amount of arguments
-#NOTE: Doesn't check that arguments are in proper format
-if len(sys.argv) != 7:
-    raise ValueError("Proper usage: %s serial_port baudrate udp_recieve_ip udp_recieve_port udp_send_ip udp_send_port" % sys.argv[0]) 
-else:               
-    curPort = sys.argv[1]
-    baud = int(sys.argv[2])
-    host = sys.argv[3]
-    port = int(sys.argv[4])
-    returnIP = sys.argv[5]
-    returnPort = int(sys.argv[6])
+class SerialToNet(serial.threaded.Protocol):
+    """serial->socket"""
 
-#Common baud rates used in Arduinos
-BAUDRATES = (50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800, 9600, 19200, 38400, 57600, 115200)
+    def __init__(self, target):
+        self.socket = None
+        self.target = target
 
-def serial_ports():
-    """ Lists serial port names
+    def __call__(self):
+        return self
 
-        :raises EnvironmentError:
-            On unsupported or unknown platforms
-        :returns:
-            A list of the serial ports available on the system
-    """
-    #Support for other platforms including windows and cygwin
-    if sys.platform.startswith('win'): 
-        ports = ['COM%s' % (i + 1) for i in range(256)]
-    elif sys.platform.startswith('linux') or sys.platform.startswith('cygwin'): 
-        # this excludes your current terminal "/dev/tty"
-        ports = glob.glob('/dev/tty[A-Za-z]*')
-    elif sys.platform.startswith('darwin'):
-        ports = glob.glob('/dev/tty.*')
-    else:
-        raise EnvironmentError('Unsupported platform')
-
-    #Goes through proposed valid ports, checking them by opening a serial connection
-    result = []
-    for port in ports:
-        try:
-            s = serial.Serial(port) #Opens serial connection
-            s.close()
-            result.append(port)
-        except (OSError, serial.SerialException): #On fail to open, continues checking
-            pass
-    return result
-
-#Check if any supported serial ports are found
-ports = serial_ports()
-if len(ports) == 0:
-    raise ValueError("No serial ports found or all are currently used!")
-
-#Check that entered baud rate is in predefined list of baud rates
-if baud not in BAUDRATES:
-    raise ValueError("Invalid baud rate! Valid baud rates: " + ", ".join(BUADRATES))
-
-#Check that entered port name is in list of valid serial ports
-if curPort not in ports:
-    raise ValueError("Invalid serial port! Available serial ports: " + "\n".join(ports))
-
-ser = serial.Serial(curPort, baud)  
-ser.xonxoff = True 
-ser.stopbits = 1
-
-# Datagram (udp) socket
-try:
-    soc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-except Exception as msg:
-    raise EnvironmentError('Failed to create UDP socket. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
-
-# Bind socket to localhost and port
-try:
-    soc.bind((host, port))
-except Exception as msg:
-    raise EnvironmentError('UDP Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
+    def data_received(self, data):
+        if self.socket is not None:
+            self.socket.sendto(data, self.target)
 
 
+if __name__ == '__main__':  # noqa
+    import argparse
 
-runThreads = True #When false, all active threads will try to exit 
-UDPQueue = Queue()
-SerialQueue = Queue()
-serialLock = threading.Lock() #Needed because serial is not threadsafe
+    parser = argparse.ArgumentParser(
+        description='Simple Serial to Network (TCP/IP) redirector.',
+        epilog="""\
+NOTE: no security measures are implemented. Anyone can remotely connect
+to this service over the network.
 
-class UDPListener(threading.Thread):
-    def __init__(self, soc, UDPQueue):
-        threading.Thread.__init__(self)
-        self.UDPQueue = UDPQueue #Reference to queue, used by SerialSender
-        self.soc = soc           #Reference to UDP Socket, used by UDPSender
-    
-    def run(self):
-        while runThreads:
-            data, addr = self.soc.recvfrom(1024)
-            print("UDPL: %s" % str(data))
-            for b in data:
-                UDPQueue.put(b)
-    
+Only one connection at once is supported. When the connection is terminated
+it waits for the next connect.
+""")
 
-class SerialSender(threading.Thread):
-    def __init__(self, ser, UDPQueue):
-        threading.Thread.__init__(self)
-        self.UDPQueue = UDPQueue #Reference to queue, used by UDPListener
-        self.ser = ser           #Reference to Serial Port, used by SerialListener
+    parser.add_argument(
+        'SERIALPORT',
+        help="serial port name")
 
-    def run(self):
-        while runThreads:
-            data = self.UDPQueue.get()
-            print("SS waiting for lock")
-            #serialLock.acquire()
-            print("SS got lock")
-            self.ser.write(data)
-            print("SS: %s" % str(data))
-            #serialLock.release()
-            print("SS lost lock")
+    parser.add_argument(
+        'BAUDRATE',
+        type=int,
+        nargs='?',
+        help='set baud rate, default: %(default)s',
+        default=9600)
 
-class SerialListener(threading.Thread):
-    def __init__(self, ser, SerialQueue):
-        threading.Thread.__init__(self)
-        self.SerialQueue = SerialQueue
-        self.ser = ser
-    def run(self):
-        while runThreads:
-            #print("SL waiting for lock")
-            #serialLock.acquire() 
-            #print("SL got lock")
-            data = ser.read()
-            if data != b'\x00':
-                print("SL: %s" % str(data))
-            self.SerialQueue.put(data)
-            #serialLock.release()
-            #print("SL lost lock")
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='suppress non error messages',
+        default=False)
 
-class UDPSender(threading.Thread):
-    def __init__(self, soc, SerialQueue):
-        threading.Thread.__init__(self)
-        self.SerialQueue = SerialQueue
-        self.soc = soc
-    def run(self):
-        while runThreads:
-            data = self.SerialQueue.get()
-            #print("UDPS: %s" % str(data))
-            soc.sendto(data, (returnIP, returnPort))
+    parser.add_argument(
+        '--develop',
+        action='store_true',
+        help='Development mode, prints Python internals on errors',
+        default=False)
 
-threads = [UDPListener(soc, UDPQueue), SerialSender(ser, UDPQueue), None, UDPSender(soc, SerialQueue)]
-for thread in threads:
+    group = parser.add_argument_group('serial port')
+
+    group.add_argument(
+        "--parity",
+        choices=['N', 'E', 'O', 'S', 'M'],
+        type=lambda c: c.upper(),
+        help="set parity, one of {N E O S M}, default: N",
+        default='N')
+
+    group.add_argument(
+        '--rtscts',
+        action='store_true',
+        help='enable RTS/CTS flow control (default off)',
+        default=False)
+
+    group.add_argument(
+        '--xonxoff',
+        action='store_true',
+        help='enable software flow control (default off)',
+        default=False)
+
+    group.add_argument(
+        '--rts',
+        type=int,
+        help='set initial RTS line state (possible values: 0, 1)',
+        default=None)
+
+    group.add_argument(
+        '--dtr',
+        type=int,
+        help='set initial DTR line state (possible values: 0, 1)',
+        default=None)
+
+    group = parser.add_argument_group('network settings')
+
+    exclusive_group = group.add_mutually_exclusive_group()
+
+    exclusive_group.add_argument(
+        '-P', '--localport',
+        type=int,
+        help='local TCP port',
+        default=7777)
+
+    exclusive_group.add_argument(
+        '-c', '--client',
+        metavar='HOST:PORT',
+        help='make the connection as a client, instead of running a server',
+        default=False)
+
+    args = parser.parse_args()
+
+    # connect to serial port
+    ser = serial.serial_for_url(args.SERIALPORT, do_not_open=True)
+    ser.baudrate = args.BAUDRATE
+    ser.parity = args.parity #default: N
+    ser.rtscts = args.rtscts #default: False
+    ser.xonxoff = args.xonxoff #default: False
+
+    if args.rts is not None:
+        ser.rts = args.rts
+
+    if args.dtr is not None:
+        ser.dtr = args.dtr
+
+    if not args.quiet:
+        sys.stderr.write(
+            '--- TCP/IP to Serial redirect on {p.name}  {p.baudrate},{p.bytesize},{p.parity},{p.stopbits} ---\n'
+            '--- type Ctrl-C / BREAK to quit\n'.format(p=ser))
+
     try:
-        thread.start()
-    except:
+        ser.open()
+    except serial.SerialException as e:
+        sys.stderr.write('Could not open serial port {}: {}\n'.format(ser.name, e))
+        sys.exit(1)
+
+    ser_to_net = SerialToNet(('127.0.0.1', 12345))
+    serial_worker = serial.threaded.ReaderThread(ser, ser_to_net)
+    serial_worker.start()
+
+    if not args.client:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        #srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(('', args.localport))
+        #srv.listen(1)
+    try:
+        intentional_exit = False
+        while True:
+            if args.client:
+                host, port = args.client.split(':')
+                sys.stderr.write("Opening connection to {}:{}...\n".format(host, port))
+                client_socket = socket.socket()
+                try:
+                    client_socket.connect((host, int(port)))
+                except socket.error as msg:
+                    sys.stderr.write('WARNING: {}\n'.format(msg))
+                    time.sleep(5)  # intentional delay on reconnection as client
+                    continue
+                sys.stderr.write('Connected\n')
+                client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                #~ client_socket.settimeout(5)
+            else:
+                sys.stderr.write('Waiting for connection on {}...\n'.format(args.localport))
+                #client_socket, addr = srv.accept()
+                #sys.stderr.write('Connected by {}\n'.format(addr))
+                # More quickly detect bad clients who quit without closing the
+                # connection: After 1 second of idle, start sending TCP keep-alive
+                # packets every 1 second. If 3 consecutive keep-alive packets
+                # fail, assume the client is gone and close the connection.
+                #try:
+                #    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+                #    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+                #    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                #    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                #except AttributeError:
+                #    pass # XXX not available on windows
+                #client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                #ser_to_net.socket = client_socket
+                # enter network <-> serial loop
+                ser_to_net.socket = srv
+                while True:
+                    try:
+                        #data = client_socket.recv(1024)
+                        data = srv.recv(1024)
+                        #if not data:
+                        #    break
+                        ser.write(data)                 # get a bunch of bytes and send them
+                    except socket.error as msg:
+                        if args.develop:
+                            raise
+                        sys.stderr.write('ERROR: {}\n'.format(msg))
+                        # probably got disconnected
+                        break
+            except KeyboardInterrupt:
+                intentional_exit = True
+                raise
+            except socket.error as msg:
+                if args.develop:
+                    raise
+                sys.stderr.write('ERROR: {}\n'.format(msg))
+            finally:
+                ser_to_net.socket = None
+                sys.stderr.write('Disconnected\n')
+                client_socket.close()
+                if args.client and not intentional_exit:
+                    time.sleep(5)  # intentional delay on reconnection as client
+    except KeyboardInterrupt:
         pass
 
-import time
-time.sleep(1.1)
-threads[2] = SerialListener(ser, SerialQueue)
-threads[2].start()
+    sys.stderr.write('\n--- exit ---\n')
+    serial_worker.stop()
