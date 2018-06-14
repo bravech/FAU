@@ -16,9 +16,9 @@ class SerialToNet(serial.threaded.Protocol):
     def __call__(self):
         return self
 
-    def data_received(self, data):
+    def data_received(self, data):  # Called by thread when data recieved
         if self.socket is not None:
-            self.socket.sendto(data, self.target)
+            self.socket.sendto(data, self.target) # Send all data to udp port, packetized automatically
 
 
 if __name__ == '__main__':
