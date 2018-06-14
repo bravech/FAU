@@ -13,7 +13,7 @@ import serial.threaded
 import time
 
 
-class SerialToNet(serial.threaded.Protocol):
+class SerialToNet(serial.threaded.Protocol): #Used as a helper class for serial.threaded
     """serial->socket"""
 
     def __init__(self, target):
@@ -32,14 +32,7 @@ if __name__ == '__main__':  # noqa
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='Simple Serial to Network (TCP/IP) redirector.',
-        epilog="""\
-NOTE: no security measures are implemented. Anyone can remotely connect
-to this service over the network.
-
-Only one connection at once is supported. When the connection is terminated
-it waits for the next connect.
-""")
+        description='Simple Serial to UDP Sockets redirector.')
 
     parser.add_argument(
         'SERIALPORT',
@@ -102,16 +95,29 @@ it waits for the next connect.
     exclusive_group = group.add_mutually_exclusive_group()
 
     exclusive_group.add_argument(
-        '-P', '--localport',
-        type=int,
-        help='local TCP port',
-        default=7777)
-
+        '-P', '--localIP',
+        help='local UDP IP (default localhost)',
+        default='')
+    
     exclusive_group.add_argument(
-        '-c', '--client',
-        metavar='HOST:PORT',
-        help='make the connection as a client, instead of running a server',
-        default=False)
+        '-p', '--localport',
+        type=int,
+        help='local UDP port (default 7777)',
+        default=7777)
+    
+    exclusive_group.add_argument(
+            '-R', '--remoteIP',
+            help='remote UDP IP (default localhost)',
+            default=''
+            )
+    
+    exclusive_group.add_argument(
+            '-r', '--remoteport',
+            type=int,
+            help='remote UDP port (default 8888)',
+            default=8888
+            )
+
 
     args = parser.parse_args()
 
@@ -130,7 +136,7 @@ it waits for the next connect.
 
     if not args.quiet:
         sys.stderr.write(
-            '--- TCP/IP to Serial redirect on {p.name}  {p.baudrate},{p.bytesize},{p.parity},{p.stopbits} ---\n'
+            '--- UDP to Serial redirect on {p.name}  {p.baudrate},{p.bytesize},{p.parity},{p.stopbits} ---\n'
             '--- type Ctrl-C / BREAK to quit\n'.format(p=ser))
 
     try:
@@ -166,20 +172,6 @@ it waits for the next connect.
                 #~ client_socket.settimeout(5)
             else:
                 sys.stderr.write('Waiting for connection on {}...\n'.format(args.localport))
-                #client_socket, addr = srv.accept()
-                #sys.stderr.write('Connected by {}\n'.format(addr))
-                # More quickly detect bad clients who quit without closing the
-                # connection: After 1 second of idle, start sending TCP keep-alive
-                # packets every 1 second. If 3 consecutive keep-alive packets
-                # fail, assume the client is gone and close the connection.
-                #try:
-                #    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-                #    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
-                #    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-                #    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                #except AttributeError:
-                #    pass # XXX not available on windows
-                #client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
                 #ser_to_net.socket = client_socket
                 # enter network <-> serial loop
